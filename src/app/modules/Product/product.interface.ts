@@ -21,4 +21,6 @@ export type TProduct = {
   sizes: TProductSize[]; // Array of embedded size/stock documents
   sku?: string; // Main product SKU (optional)
   isActive: boolean;
+  averageRating: number;
+  reviewCount: number;
 };
