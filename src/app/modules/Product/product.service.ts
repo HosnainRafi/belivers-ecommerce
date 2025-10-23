@@ -7,6 +7,7 @@ import calculatePagination from "../../../shared/calculatePagination";
 import { Product } from "./product.model";
 import { TProduct } from "./product.interface";
 import { Category } from "../Category/category.model";
+import mongoose from "mongoose";
 
 // --- Create Product ---
 const createProductIntoDB = async (payload: TProduct): Promise<TProduct> => {
@@ -169,10 +170,88 @@ const deleteProductFromDB = async (id: string): Promise<TProduct | null> => {
   return product;
 };
 
+type TDiscountPayload = {
+  categoryId: string;
+  discountType: "percentage" | "fixed";
+  discountValue: number;
+};
+
+const applyCategoryDiscountToDB = async (
+  payload: TDiscountPayload
+): Promise<{ modifiedCount: number }> => {
+  const { categoryId, discountType, discountValue } = payload;
+
+  // 1. Check if category exists
+  const category = await Category.findById(categoryId);
+  if (!category) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Category not found.");
+  }
+
+  // 2. Find all active products in this category
+  const products = await Product.find({
+    category: new mongoose.Types.ObjectId(categoryId),
+    isActive: true,
+  });
+
+  if (products.length === 0) {
+    throw new ApiError(
+      httpStatus.NOT_FOUND,
+      "No active products found in this category."
+    );
+  }
+
+  // 3. Prepare bulk update operations
+  const bulkOps = products.map((product) => {
+    // Set the current price as the "compare at" price
+    // Note: If a compareAtPrice already exists, this will overwrite it.
+    // An alternative is to use `product.compareAtPrice || product.basePrice`
+    const oldPrice = product.basePrice;
+    let newPrice = 0;
+
+    if (discountType === "percentage") {
+      if (discountValue >= 100) {
+        throw new ApiError(
+          httpStatus.BAD_REQUEST,
+          "Percentage discount must be less than 100."
+        );
+      }
+      newPrice = oldPrice * (1 - discountValue / 100);
+    } else {
+      // Fixed discount
+      newPrice = oldPrice - discountValue;
+    }
+
+    // Ensure price doesn't go below 0
+    newPrice = Math.max(0, newPrice);
+    // Round to 2 decimal places (or 0 for whole currency)
+    newPrice = parseFloat(newPrice.toFixed(2));
+
+    return {
+      updateOne: {
+        filter: { _id: product._id },
+        update: {
+          $set: {
+            basePrice: newPrice,
+            compareAtPrice: oldPrice,
+          },
+        },
+      },
+    };
+  });
+
+  // 4. Execute the bulk write
+  const result = await Product.bulkWrite(bulkOps);
+
+  return {
+    modifiedCount: result.modifiedCount,
+  };
+};
+
 export const ProductService = {
   createProductIntoDB,
   getAllProductsFromDB,
   getSingleProductFromDB,
   updateProductInDB,
   deleteProductFromDB,
+  applyCategoryDiscountToDB,
 };

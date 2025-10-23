@@ -9,6 +9,13 @@ import { ProductValidation } from "./product.validation";
 const router = express.Router();
 
 router.post(
+  "/apply-category-discount",
+  auth(ADMIN_ROLE.manager, ADMIN_ROLE.super_admin),
+  validateRequest(ProductValidation.applyCategoryDiscountZodSchema),
+  ProductController.applyCategoryDiscount
+);
+
+router.post(
   "/",
   auth(ADMIN_ROLE.manager, ADMIN_ROLE.super_admin), // Only admins can create
   validateRequest(ProductValidation.createProductZodSchema),

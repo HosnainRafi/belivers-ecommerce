@@ -17,6 +17,7 @@ export type TProduct = {
   description?: string;
   category: Types.ObjectId; // Reference to the Category model
   basePrice: number;
+  compareAtPrice?: number;
   images: string[]; // Array of image URLs
   sizes: TProductSize[]; // Array of embedded size/stock documents
   sku?: string; // Main product SKU (optional)

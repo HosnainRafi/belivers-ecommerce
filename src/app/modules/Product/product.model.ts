@@ -57,6 +57,11 @@ const productSchema = new Schema<TProduct>(
       required: true,
       min: 0,
     },
+    compareAtPrice: {
+      // The optional "original" price
+      type: Number,
+      min: 0,
+    },
     images: {
       type: [String],
       required: true,

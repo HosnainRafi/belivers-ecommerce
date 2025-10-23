@@ -72,10 +72,24 @@ const deleteProduct = catchAsync(async (req: Request, res: Response) => {
   });
 });
 
+const applyCategoryDiscount = catchAsync(
+  async (req: Request, res: Response) => {
+    const result = await ProductService.applyCategoryDiscountToDB(req.body);
+
+    sendResponse<{ modifiedCount: number }>(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: `${result.modifiedCount} products updated successfully!`,
+      data: result,
+    });
+  }
+);
+
 export const ProductController = {
   createProduct,
   getAllProducts,
   getSingleProduct,
   updateProduct,
   deleteProduct,
+  applyCategoryDiscount,
 };
