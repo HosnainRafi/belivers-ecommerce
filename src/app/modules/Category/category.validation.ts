@@ -18,6 +18,7 @@ const createCategoryZodSchema = z.object({
       //
       name: z.string().min(1, { message: "Category name is required" }),
       description: z.string().optional(),
+      image: z.string().url({ message: "Invalid image URL" }).optional(),
     })
     .transform((data) => {
       // Automatically create the slug from the name
@@ -33,6 +34,7 @@ const updateCategoryZodSchema = z.object({
     .object({
       name: z.string().optional(),
       description: z.string().optional(),
+      image: z.string().url({ message: "Invalid image URL" }).optional(),
     })
     .transform((data) => {
       // If the name is being updated, update the slug as well

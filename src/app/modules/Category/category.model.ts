@@ -18,6 +18,9 @@ const categorySchema = new Schema<TCategory>(
     description: {
       type: String,
     },
+    image: {
+      type: String,
+    },
   },
   {
     timestamps: true,
