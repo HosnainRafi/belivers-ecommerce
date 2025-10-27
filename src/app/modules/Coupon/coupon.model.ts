@@ -62,6 +62,22 @@ const couponSchema = new Schema<TCoupon>(
       required: true,
       ref: "Admin",
     },
+    appliesToAllProducts: {
+      type: Boolean,
+      default: true,
+    },
+    appliesToCategories: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Category",
+      },
+    ],
+    appliesToProducts: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Product",
+      },
+    ],
   },
   {
     timestamps: true,

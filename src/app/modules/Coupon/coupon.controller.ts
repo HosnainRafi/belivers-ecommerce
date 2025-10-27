@@ -68,10 +68,9 @@ const deleteCoupon = catchAsync(async (req: Request, res: Response) => {
 // --- Public Controller ---
 
 const applyCoupon = catchAsync(async (req: Request, res: Response) => {
-  const { code, orderTotal } = req.body;
-  const result = await CouponService.validateAndApplyCoupon(code, orderTotal);
+  const { code, items } = req.body;
+  const result = await CouponService.validateAndApplyCoupon(code, items);
 
-  // If coupon is invalid, service throws an ApiError, handled by global error handler
   sendResponse<TCouponValidationResponse>(res, {
     statusCode: httpStatus.OK,
     success: true,

@@ -2,8 +2,10 @@
 import httpStatus from "http-status";
 import { Types } from "mongoose";
 import ApiError from "../../../errors/ApiError";
-import { TCoupon } from "./coupon.interface";
+import { TCoupon, TCouponCartItem } from "./coupon.interface";
 import { Coupon } from "./coupon.model";
+import { Product } from "../Product/product.model";
+import { TProductSize } from "../Product/product.interface";
 
 // --- Create Coupon (Admin) ---
 const createCouponIntoDB = async (
@@ -67,9 +69,10 @@ export type TCouponValidationResponse = {
   coupon?: TCoupon;
 };
 
+// --- THIS FUNCTION IS REWRITTEN ---
 const validateAndApplyCoupon = async (
   code: string,
-  orderTotal: number
+  cartItems: TCouponCartItem[]
 ): Promise<TCouponValidationResponse> => {
   const coupon = await Coupon.findOne({ code: code.toUpperCase() });
 
@@ -78,7 +81,6 @@ const validateAndApplyCoupon = async (
     throw new ApiError(httpStatus.NOT_FOUND, "Invalid coupon code.");
   }
 
-  const now = new Date();
   const response = (isValid: boolean, discount: number, message: string) => ({
     isValid,
     discountAmount: discount,
@@ -86,23 +88,74 @@ const validateAndApplyCoupon = async (
     coupon: isValid ? coupon : undefined,
   });
 
-  // 2. Check if active
+  // 2. Fetch products from DB to get verified prices and categories
+  const productIds = cartItems.map((item) => item.productId);
+  const productsFromDB = await Product.find({ _id: { $in: productIds } });
+
+  let orderTotal = 0;
+  let eligibleTotal = 0; // Total of items this coupon applies to
+
+  for (const item of cartItems) {
+    const product = productsFromDB.find(
+      (p) => p._id.toString() === item.productId
+    );
+    // Skip if product not found or is inactive
+    if (!product || !product.isActive) continue;
+
+    const size = product.sizes.find(
+      (s: TProductSize) => s._id?.toString() === item.productSizeId
+    );
+    // Skip if size is invalid
+    if (!size) continue;
+
+    const unitPrice = size.priceOverride ?? product.basePrice;
+    const itemTotal = unitPrice * item.quantity;
+    orderTotal += itemTotal; // Add to overall total
+
+    // 3. Check if this item is eligible for the discount
+    let isEligible = false;
+    if (coupon.appliesToAllProducts) {
+      isEligible = true;
+    } else if (coupon.appliesToCategories.length > 0) {
+      // Check if product's category is in the coupon's category list
+      if (
+        coupon.appliesToCategories.some(
+          (catId) => catId.toString() === product.category.toString()
+        )
+      ) {
+        isEligible = true;
+      }
+    } else if (coupon.appliesToProducts.length > 0) {
+      // Check if product's ID is in the coupon's product list
+      if (
+        coupon.appliesToProducts.some(
+          (prodId) => prodId.toString() === product._id.toString()
+        )
+      ) {
+        isEligible = true;
+      }
+    }
+
+    if (isEligible) {
+      eligibleTotal += itemTotal;
+    }
+  }
+
+  // --- 4. Run all validation checks ---
+  const now = new Date();
   if (!coupon.isActive) {
     return response(false, 0, "This coupon is not active.");
   }
-  // 3. Check if expired (validUntil)
   if (coupon.validUntil < now) {
     return response(false, 0, "This coupon has expired.");
   }
-  // 4. Check if not yet valid (validFrom)
   if (coupon.validFrom > now) {
     return response(false, 0, "This coupon is not yet valid.");
   }
-  // 5. Check usage limit
   if (coupon.usedCount >= coupon.usageLimit) {
     return response(false, 0, "This coupon has reached its usage limit.");
   }
-  // 6. Check minimum order amount
+  // Check minOrderAmount against the *total* order, not just eligible items
   if (coupon.minOrderAmount && orderTotal < coupon.minOrderAmount) {
     return response(
       false,
@@ -110,26 +163,35 @@ const validateAndApplyCoupon = async (
       `Minimum order of $${coupon.minOrderAmount} required.`
     );
   }
+  // If no items were eligible, coupon is invalid for this cart
+  if (eligibleTotal === 0 && !coupon.appliesToAllProducts) {
+    return response(
+      false,
+      0,
+      "This coupon is not valid for the items in your cart."
+    );
+  }
 
-  // --- All checks passed, calculate discount ---
+  // --- 5. All checks passed, calculate discount ---
+  // The discount is applied ONLY to the eligibleTotal
   let discountAmount = 0;
 
   if (coupon.type === "fixed") {
     discountAmount = coupon.value;
-    // Ensure discount doesn't exceed order total
-    if (discountAmount > orderTotal) {
-      discountAmount = orderTotal;
+    // Ensure discount doesn't exceed the total of eligible items
+    if (discountAmount > eligibleTotal) {
+      discountAmount = eligibleTotal;
     }
   } else if (coupon.type === "percentage") {
-    discountAmount = (orderTotal * coupon.value) / 100;
+    discountAmount = (eligibleTotal * coupon.value) / 100;
 
     // Check for max discount cap
     if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
       discountAmount = coupon.maxDiscountAmount;
     }
-    // Ensure discount doesn't exceed order total
-    if (discountAmount > orderTotal) {
-      discountAmount = orderTotal;
+    // Ensure discount doesn't exceed the total of eligible items
+    if (discountAmount > eligibleTotal) {
+      discountAmount = eligibleTotal;
     }
   }
 
@@ -139,7 +201,6 @@ const validateAndApplyCoupon = async (
     "Coupon applied successfully!"
   );
 };
-
 export const CouponService = {
   createCouponIntoDB,
   getAllCouponsFromDB,

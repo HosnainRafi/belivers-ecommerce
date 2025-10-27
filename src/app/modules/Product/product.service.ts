@@ -111,12 +111,10 @@ const getSingleProductFromDB = async (
   idOrSlug: string
 ): Promise<TProduct | null> => {
   let product;
-  // Check if the identifier is a valid ObjectId
   if (Types.ObjectId.isValid(idOrSlug)) {
     product = await Product.findById(idOrSlug).populate("category");
   }
 
-  // If not found by ID, try finding by slug
   if (!product) {
     product = await Product.findOne({ slug: idOrSlug }).populate("category");
   }
@@ -124,11 +122,6 @@ const getSingleProductFromDB = async (
   if (!product) {
     throw new ApiError(httpStatus.NOT_FOUND, "Product not found.");
   }
-
-  // Optional: For public view, only show if active
-  // if (!product.isActive) {
-  //   throw new ApiError(httpStatus.NOT_FOUND, 'Product not found.');
-  // }
 
   return product;
 };
@@ -151,23 +144,18 @@ const updateProductInDB = async (
   return result;
 };
 
-// --- Delete Product (Soft Delete) ---
-// We will set isActive to false instead of hard deleting
 const deleteProductFromDB = async (id: string): Promise<TProduct | null> => {
-  const product = await Product.findById(id);
-  if (!product) {
+  const result = await Product.findByIdAndUpdate(
+    id,
+    { isActive: false },
+    { new: true }
+  );
+
+  if (!result) {
     throw new ApiError(httpStatus.NOT_FOUND, "Product not found.");
   }
 
-  // Soft delete by setting isActive to false
-  product.isActive = false;
-  await product.save();
-
-  // Or, for a hard delete:
-  // const result = await Product.findByIdAndDelete(id);
-  // return result;
-
-  return product;
+  return result;
 };
 
 type TDiscountPayload = {

@@ -10,14 +10,9 @@ import {
   TCouponValidationResponse,
 } from "../Coupon/coupon.service";
 import { Product } from "../Product/product.model";
-// TProduct, TProductSize are not used directly, so they can be removed if you like
-// import { TProduct, TProductSize } from '../Product/product.interface';
 import { TCreateOrderPayload, TOrder, TOrderItem } from "./order.interface";
 import { Order } from "./order.model";
 import { generateTrackingNumber } from "./order.utils";
-//
-// --- FIX 1: Import OrderStatus ---
-//
 import { PaymentStatus, OrderStatus } from "./order.constants";
 
 // --- Create Order (Public) ---
@@ -38,13 +33,16 @@ const createOrderIntoDB = async (
 
   let subtotal = 0;
   const processedItems: TOrderItem[] = [];
+  // Prepare stock updates
   const stockUpdates: {
     productId: string;
     sizeId: string;
     quantity: number;
+    title: string; // For potential error messages
+    size: string; // For potential error messages
   }[] = [];
 
-  // 2. Validate items and calculate subtotal
+  // 2. Validate items, calculate subtotal, prepare stock updates
   for (const item of items) {
     const product = productsFromDB.find(
       (p) => p._id.toString() === item.productId
@@ -64,7 +62,6 @@ const createOrderIntoDB = async (
     }
 
     const size = product.sizes.find(
-      // Errors 1, 2, 3 are fixed by changes in product.interface.ts
       (s) => s._id?.toString() === item.productSizeId
     );
 
@@ -75,6 +72,7 @@ const createOrderIntoDB = async (
       );
     }
 
+    // *** STOCK CHECK REMAINS CRUCIAL ***
     if (size.stock < item.quantity) {
       throw new ApiError(
         httpStatus.BAD_REQUEST,
@@ -82,18 +80,16 @@ const createOrderIntoDB = async (
       );
     }
 
-    // Use priceOverride if available, otherwise basePrice
     const unitPrice = size.priceOverride ?? product.basePrice;
     const totalPrice = unitPrice * item.quantity;
     subtotal += totalPrice;
 
-    // Add to processed items for order document
     processedItems.push({
       productId: product._id,
-      productSizeId: size._id!, // We can use non-null assertion '!' here
+      productSizeId: size._id!,
       title: product.title,
       size: size.size,
-      image: product.images[0], // Use the first image
+      image: product.images[0],
       quantity: item.quantity,
       unitPrice: unitPrice,
       totalPrice: totalPrice,
@@ -102,52 +98,65 @@ const createOrderIntoDB = async (
     // Add to stock update list
     stockUpdates.push({
       productId: product._id.toString(),
-      sizeId: size._id!.toString(), // We can use non-null assertion '!' here
+      sizeId: size._id!.toString(),
       quantity: item.quantity,
+      title: product.title,
+      size: size.size,
     });
   }
 
-  // 3. Validate and apply coupon
+  // 3. Validate and apply coupon (ensure coupon service uses items if needed)
   let couponValidation: TCouponValidationResponse = {
     isValid: false,
     discountAmount: 0,
     message: "",
   };
-
   if (couponCode) {
+    // Assuming coupon service needs items for category/product checks
     couponValidation = await CouponService.validateAndApplyCoupon(
       couponCode,
-      subtotal
+      items // Pass cart items
     );
     if (!couponValidation.isValid) {
-      // If coupon is invalid, we don't block the order, just throw the error message
       throw new ApiError(httpStatus.BAD_REQUEST, couponValidation.message);
     }
   }
 
-  // 4. Calculate final totals
+  // 4. Calculate final totals (unchanged)
   const discountAmount = couponValidation.discountAmount;
   const totalAmount = subtotal + shipping - discountAmount;
 
-  // 5. Create the order within a transaction
+  // 5. Create the order AND DECREMENT STOCK within a transaction
   const session = await mongoose.startSession();
   let newOrder: TOrder | null = null;
   try {
     session.startTransaction();
 
-    // 5a. Decrement product stock
+    // 5a. Decrement product stock (Reserve stock)
     for (const update of stockUpdates) {
-      await Product.updateOne(
-        { _id: update.productId, "sizes._id": update.sizeId },
+      const updateResult = await Product.updateOne(
+        // Atomically check stock >= quantity during update to prevent race conditions
+        {
+          _id: update.productId,
+          "sizes._id": update.sizeId,
+          "sizes.stock": { $gte: update.quantity },
+        },
         { $inc: { "sizes.$.stock": -update.quantity } },
         { session }
       );
+
+      // If updateResult.modifiedCount is 0, stock was insufficient (race condition)
+      if (updateResult.modifiedCount === 0) {
+        throw new ApiError(
+          httpStatus.CONFLICT, // 409 Conflict is appropriate
+          `Stock changed for ${update.title} (Size: ${update.size}) just before order completion. Please try again.`
+        );
+      }
     }
 
-    // 5b. Increment coupon usage
+    // 5b. Increment coupon usage (unchanged)
     if (couponValidation.isValid && couponValidation.coupon) {
       await Coupon.updateOne(
-        // Errors 4, 5 are fixed by changes in coupon.interface.ts
         { _id: couponValidation.coupon._id },
         { $inc: { usedCount: 1 } },
         { session }
@@ -164,12 +173,12 @@ const createOrderIntoDB = async (
           orderNote: orderNote,
           subtotal: subtotal,
           shipping: shipping,
-          couponId: couponValidation.coupon?._id, // Fixed by coupon.interface.ts
+          couponId: couponValidation.coupon?._id,
           discountAmount: discountAmount,
           totalAmount: totalAmount,
-          paymentStatus: "pending", // Default
-          status: "pending", // Default
-          statusHistory: [], // Pre-save hook will add initial status
+          paymentStatus: "pending",
+          status: "pending", // Order starts as pending
+          statusHistory: [], // Pre-save hook adds initial history
         },
       ],
       { session }
@@ -179,31 +188,33 @@ const createOrderIntoDB = async (
     await session.commitTransaction();
   } catch (error) {
     await session.abortTransaction();
-
-    //
-    // --- FIX 2: Handle 'unknown' error type ---
-    //
+    // Pass specific error messages through
+    const message =
+      error instanceof ApiError
+        ? error.message
+        : "Failed to create order. Please try again.";
+    const statusCode =
+      error instanceof ApiError
+        ? error.statusCode
+        : httpStatus.INTERNAL_SERVER_ERROR;
     const stack = error instanceof Error ? error.stack : undefined;
-    throw new ApiError(
-      httpStatus.INTERNAL_SERVER_ERROR,
-      "Failed to create order. Please try again.",
-      stack // Pass the stack string
-    );
+    throw new ApiError(statusCode, message, stack);
   } finally {
     session.endSession();
   }
 
   if (!newOrder) {
+    // Should not happen if transaction logic is correct
     throw new ApiError(
       httpStatus.INTERNAL_SERVER_ERROR,
-      "Failed to create order."
+      "Failed to create order after transaction."
     );
   }
 
   return newOrder;
 };
 
-// --- Get All Orders (Admin) ---
+// --- Get All Orders (Admin) --- (Unchanged)
 const getAllOrdersFromDB = async (options: {
   page?: number;
   limit?: number;
@@ -229,7 +240,7 @@ const getAllOrdersFromDB = async (options: {
   };
 };
 
-// --- Get Single Order (Admin or authenticated user) ---
+// --- Get Single Order (Admin or authenticated user) --- (Unchanged)
 const getSingleOrderFromDB = async (
   orderId: string
 ): Promise<TOrder | null> => {
@@ -248,46 +259,105 @@ const updateOrderStatusInDB = async (
   orderId: string,
   adminId: string,
   payload: {
-    //
-    // --- FIX 3: Error 7 fixed by import ---
-    //
     status: (typeof OrderStatus)[number];
     paymentStatus?: (typeof PaymentStatus)[number];
     note?: string;
   }
 ): Promise<TOrder | null> => {
-  const order = await Order.findById(orderId);
-  if (!order) {
-    throw new ApiError(httpStatus.NOT_FOUND, "Order not found.");
-  }
+  // Use a session for atomicity
+  const session = await mongoose.startSession();
+  let updatedOrder: TOrder | null = null;
 
-  const { status, paymentStatus, note } = payload;
+  try {
+    session.startTransaction();
 
-  // Add to status history
-  order.statusHistory.push({
-    status: status,
-    note: note || `Status changed to ${status}`,
-    changedBy: new mongoose.Types.ObjectId(adminId),
-    changedAt: new Date(),
-  });
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      throw new ApiError(httpStatus.NOT_FOUND, "Order not found.");
+    }
 
-  // Update the main status fields
-  order.status = status;
-  if (paymentStatus) {
-    order.paymentStatus = paymentStatus;
-  }
+    const { status, paymentStatus, note } = payload;
+    const previousStatus = order.status;
 
-  // If order is 'cancelled', we should restore stock (complex logic, simplified here)
-  if (status === "cancelled") {
-    console.warn(
-      `Order ${orderId} cancelled. Stock should be restored. (Not implemented)`
+    // If status isn't changing, just update payment/note and save
+    if (status === previousStatus) {
+      let changed = false;
+      if (paymentStatus && order.paymentStatus !== paymentStatus) {
+        order.paymentStatus = paymentStatus;
+        changed = true;
+      }
+      // Add a note even if status doesn't change
+      if (note) {
+        order.statusHistory.push({
+          status: previousStatus, // Keep current status
+          note: `Note added: ${note}`,
+          changedBy: new mongoose.Types.ObjectId(adminId),
+          changedAt: new Date(),
+        });
+        changed = true;
+      }
+      // Only save if something actually changed
+      if (changed) {
+        updatedOrder = await order.save({ session });
+      } else {
+        updatedOrder = order; // Return the unchanged order
+      }
+      await session.commitTransaction();
+      session.endSession();
+      return updatedOrder;
+    }
+
+    // --- MANAGE STOCK REVERSAL ON CANCELLATION ---
+    // INCREMENT Stock ONLY when cancelling an order where stock was previously reserved/decremented.
+    if (
+      status === "cancelled" &&
+      (previousStatus === "pending" || // Stock was decremented on creation
+        previousStatus === "confirmed" ||
+        previousStatus === "shipped") // Check all states where stock was held
+    ) {
+      for (const item of order.items) {
+        await Product.updateOne(
+          { _id: item.productId, "sizes._id": item.productSizeId },
+          { $inc: { "sizes.$.stock": item.quantity } }, // Add back the quantity
+          { session }
+        );
+      }
+    }
+    // --- NO Stock decrement needed on confirmation/shipping anymore ---
+
+    // Update the order document status and history
+    order.statusHistory.push({
+      status: status,
+      note: note || `Status changed from ${previousStatus} to ${status}`,
+      changedBy: new mongoose.Types.ObjectId(adminId),
+      changedAt: new Date(),
+    });
+    order.status = status;
+    if (paymentStatus) {
+      order.paymentStatus = paymentStatus;
+    }
+
+    updatedOrder = await order.save({ session });
+    await session.commitTransaction();
+  } catch (error) {
+    await session.abortTransaction();
+    const message =
+      error instanceof ApiError
+        ? error.message
+        : "Failed to update order status or stock.";
+    const stack = error instanceof Error ? error.stack : undefined;
+    throw new ApiError(
+      error instanceof ApiError
+        ? error.statusCode
+        : httpStatus.INTERNAL_SERVER_ERROR,
+      message,
+      stack
     );
-    // TODO: Add logic to restore stock
-    // For each item in order.items, find Product and $inc stock
+  } finally {
+    session.endSession();
   }
 
-  await order.save();
-  return order;
+  return updatedOrder;
 };
 
 export const OrderService = {

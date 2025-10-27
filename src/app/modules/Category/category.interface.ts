@@ -4,4 +4,8 @@ export type TCategory = {
   slug: string;
   description?: string;
   image?: string;
+  sizeChart?: {
+    headers: string[];
+    rows: string[][];
+  };
 };

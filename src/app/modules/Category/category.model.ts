@@ -2,6 +2,20 @@
 import { Schema, model } from "mongoose";
 import { TCategory } from "./category.interface";
 
+const sizeChartSchema = new Schema(
+  {
+    headers: {
+      type: [String],
+      required: true,
+    },
+    rows: {
+      type: [[String]], // Array of string arrays
+      required: true,
+    },
+  },
+  { _id: false } // Don't create a separate _id for the chart object
+);
+
 const categorySchema = new Schema<TCategory>(
   {
     name: {
@@ -20,6 +34,10 @@ const categorySchema = new Schema<TCategory>(
     },
     image: {
       type: String,
+    },
+    sizeChart: {
+      type: sizeChartSchema,
+      optional: true,
     },
   },
   {
