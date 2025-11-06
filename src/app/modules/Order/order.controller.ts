@@ -3,7 +3,7 @@ import { Request, Response } from "express";
 import httpStatus from "http-status";
 import catchAsync from "../../../shared/catchAsync";
 import sendResponse from "../../../shared/sendResponse";
-import { TOrder } from "./order.interface";
+import { TOrder, TPublicOrderTracking } from "./order.interface";
 import { OrderService } from "./order.service";
 import pick from "../../../shared/pick";
 
@@ -58,9 +58,22 @@ const updateOrderStatus = catchAsync(async (req: Request, res: Response) => {
   });
 });
 
+const trackOrder = catchAsync(async (req: Request, res: Response) => {
+  const { trackingNumber, mobile } = req.body;
+  const result = await OrderService.trackOrderPublicly(trackingNumber, mobile);
+
+  sendResponse<TPublicOrderTracking[]>(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Order status retrieved successfully!",
+    data: result,
+  });
+});
+
 export const OrderController = {
   createOrder,
   getAllOrders,
   getSingleOrder,
   updateOrderStatus,
+  trackOrder,
 };

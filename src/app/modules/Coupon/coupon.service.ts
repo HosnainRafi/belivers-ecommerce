@@ -72,80 +72,31 @@ export type TCouponValidationResponse = {
 // --- THIS FUNCTION IS REWRITTEN ---
 const validateAndApplyCoupon = async (
   code: string,
-  cartItems: TCouponCartItem[]
+  items: TCouponCartItem[]
 ): Promise<TCouponValidationResponse> => {
-  const coupon = await Coupon.findOne({ code: code.toUpperCase() });
-
-  // 1. Check if coupon exists
-  if (!coupon) {
-    throw new ApiError(httpStatus.NOT_FOUND, "Invalid coupon code.");
-  }
-
-  const response = (isValid: boolean, discount: number, message: string) => ({
+  const response = (
+    isValid: boolean,
+    discountAmount: number,
+    message: string,
+    coupon?: TCoupon
+  ): TCouponValidationResponse => ({
     isValid,
-    discountAmount: discount,
+    discountAmount,
     message,
-    coupon: isValid ? coupon : undefined,
+    coupon,
   });
 
-  // 2. Fetch products from DB to get verified prices and categories
-  const productIds = cartItems.map((item) => item.productId);
-  const productsFromDB = await Product.find({ _id: { $in: productIds } });
-
-  let orderTotal = 0;
-  let eligibleTotal = 0; // Total of items this coupon applies to
-
-  for (const item of cartItems) {
-    const product = productsFromDB.find(
-      (p) => p._id.toString() === item.productId
-    );
-    // Skip if product not found or is inactive
-    if (!product || !product.isActive) continue;
-
-    const size = product.sizes.find(
-      (s: TProductSize) => s._id?.toString() === item.productSizeId
-    );
-    // Skip if size is invalid
-    if (!size) continue;
-
-    const unitPrice = size.priceOverride ?? product.basePrice;
-    const itemTotal = unitPrice * item.quantity;
-    orderTotal += itemTotal; // Add to overall total
-
-    // 3. Check if this item is eligible for the discount
-    let isEligible = false;
-    if (coupon.appliesToAllProducts) {
-      isEligible = true;
-    } else if (coupon.appliesToCategories.length > 0) {
-      // Check if product's category is in the coupon's category list
-      if (
-        coupon.appliesToCategories.some(
-          (catId) => catId.toString() === product.category.toString()
-        )
-      ) {
-        isEligible = true;
-      }
-    } else if (coupon.appliesToProducts.length > 0) {
-      // Check if product's ID is in the coupon's product list
-      if (
-        coupon.appliesToProducts.some(
-          (prodId) => prodId.toString() === product._id.toString()
-        )
-      ) {
-        isEligible = true;
-      }
-    }
-
-    if (isEligible) {
-      eligibleTotal += itemTotal;
-    }
+  // --- 1. Find the coupon ---
+  const coupon = await Coupon.findOne({ code: code.toUpperCase() });
+  if (!coupon) {
+    return response(false, 0, "Invalid coupon code.");
   }
 
-  // --- 4. Run all validation checks ---
-  const now = new Date();
+  // --- 2. Check basic validity (active, date, usage) ---
   if (!coupon.isActive) {
-    return response(false, 0, "This coupon is not active.");
+    return response(false, 0, "This coupon is no longer active.");
   }
+  const now = new Date();
   if (coupon.validUntil < now) {
     return response(false, 0, "This coupon has expired.");
   }
@@ -155,14 +106,62 @@ const validateAndApplyCoupon = async (
   if (coupon.usedCount >= coupon.usageLimit) {
     return response(false, 0, "This coupon has reached its usage limit.");
   }
-  // Check minOrderAmount against the *total* order, not just eligible items
-  if (coupon.minOrderAmount && orderTotal < coupon.minOrderAmount) {
+
+  // --- 3. Get product data for all items in the cart ---
+  const productIds = items.map((item) => item.productId);
+  const productsFromDB = await Product.find({ _id: { $in: productIds } });
+
+  let cartSubtotal = 0;
+  let eligibleTotal = 0;
+
+  // --- 4. Calculate totals and check eligibility ---
+  for (const item of items) {
+    const product = productsFromDB.find(
+      (p) => p._id.toString() === item.productId
+    );
+    if (!product) continue; // Skip if product not found (shouldn't happen)
+
+    const size = product.sizes.find(
+      (s) => s._id?.toString() === item.productSizeId
+    );
+    if (!size) continue; // Skip if size not found
+
+    const itemPrice = size.priceOverride ?? product.basePrice;
+    const itemTotal = itemPrice * item.quantity;
+    cartSubtotal += itemTotal;
+
+    // --- 4b. *** THIS IS THE MODIFIED LOGIC *** ---
+    if (coupon.appliesToAllProducts) {
+      eligibleTotal += itemTotal;
+    } else if (coupon.appliesToCategories.length > 0) {
+      // Check if the product's category is in the coupon's list
+      const isCategoryMatch = coupon.appliesToCategories.some(
+        (categoryId) => categoryId.toString() === product.category.toString()
+      );
+      if (isCategoryMatch) {
+        eligibleTotal += itemTotal;
+      }
+    } else if (coupon.appliesToProducts.length > 0) {
+      // Check if the product's ID is in the coupon's list
+      const isProductMatch = coupon.appliesToProducts.some(
+        (productId) => productId.toString() === product._id.toString()
+      );
+      if (isProductMatch) {
+        eligibleTotal += itemTotal;
+      }
+    }
+    // --- END OF MODIFIED LOGIC ---
+  }
+
+  // --- 5. Check order minimum ---
+  if (coupon.minOrderAmount && cartSubtotal < coupon.minOrderAmount) {
     return response(
       false,
       0,
-      `Minimum order of $${coupon.minOrderAmount} required.`
+      `Minimum order of ${coupon.minOrderAmount} BDT required.`
     );
   }
+
   // If no items were eligible, coupon is invalid for this cart
   if (eligibleTotal === 0 && !coupon.appliesToAllProducts) {
     return response(
@@ -172,7 +171,7 @@ const validateAndApplyCoupon = async (
     );
   }
 
-  // --- 5. All checks passed, calculate discount ---
+  // --- 6. All checks passed, calculate discount ---
   // The discount is applied ONLY to the eligibleTotal
   let discountAmount = 0;
 
@@ -198,7 +197,8 @@ const validateAndApplyCoupon = async (
   return response(
     true,
     parseFloat(discountAmount.toFixed(2)),
-    "Coupon applied successfully!"
+    "Coupon applied successfully!",
+    coupon
   );
 };
 export const CouponService = {

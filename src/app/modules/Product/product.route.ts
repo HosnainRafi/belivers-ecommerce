@@ -39,4 +39,10 @@ router.delete(
   ProductController.deleteProduct
 );
 
+router.delete(
+  "/:id/force", // Use a distinct path like '/force' or '/permanent'
+  auth(ADMIN_ROLE.super_admin), // Maybe restrict to super_admin only?
+  ProductController.hardDeleteProduct // Calls hard delete controller
+);
+
 export const ProductRoutes = router;

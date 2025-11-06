@@ -2,71 +2,74 @@
 import { z } from "zod";
 import { CouponType } from "./coupon.constants";
 
-// 1. Define the CORE body schema first
-const couponBodyBaseSchema = z
-  .object({
-    code: z
-      .string()
-      .min(1, { message: "Coupon code is required" })
-      .toUpperCase(),
-    description: z.string().optional(),
-    type: z.enum([...CouponType] as [string, ...string[]], {
-      message: "Coupon type is required",
-    }),
-    value: z.coerce
-      .number({
-        message: "Discount value is required and must be a number",
-      })
-      .positive({ message: "Discount value must be positive" }),
-    minOrderAmount: z.coerce.number().positive().optional(),
-    maxDiscountAmount: z.coerce.number().positive().optional(),
-    usageLimit: z.coerce
-      .number({
-        message: "Usage limit is required and must be a number",
-      })
-      .int()
-      .positive({ message: "Usage limit must be a positive integer" }),
-    validFrom: z.coerce.date({ message: 'Invalid "valid from" date' }),
-    validUntil: z.coerce.date({ message: 'Invalid "valid until" date' }),
-    isActive: z.boolean().default(true),
+// --- Base Schema (Common fields) ---
+const couponBaseFields = z.object({
+  code: z.string().min(1, { message: "Coupon code is required" }).toUpperCase(),
+  description: z.string().optional(),
+  value: z.coerce
+    .number({
+      message: "Discount value is required and must be a number",
+    })
+    .positive({ message: "Discount value must be positive" }),
+  minOrderAmount: z.coerce.number().positive().optional(),
+  usageLimit: z.coerce
+    .number({
+      message: "Usage limit is required and must be a number",
+    })
+    .int()
+    .positive({ message: "Usage limit must be a positive integer" }),
+  validFrom: z.coerce.date({ message: 'Invalid "valid from" date' }),
+  validUntil: z.coerce.date({ message: 'Invalid "valid until" date' }),
+  isActive: z.boolean().default(true).optional(),
+  appliesToAllProducts: z.boolean().default(true).optional(),
+  appliesToCategories: z.array(z.string()).optional(),
+  appliesToProducts: z.array(z.string()).optional(),
+});
 
-    // --- ADD THESE NEW FIELDS ---
-    appliesToAllProducts: z.boolean().default(true).optional(),
-    appliesToCategories: z.array(z.string()).optional(), // Array of string IDs
-    appliesToProducts: z.array(z.string()).optional(), // Array of string IDs
-  })
-  // ... (existing .refine for dates, percentage, etc. are unchanged) ...
+// --- Schema specific to 'percentage' coupons ---
+const percentageCouponSchema = couponBaseFields.extend({
+  type: z.literal(CouponType[0]), // 'percentage'
+  value: couponBaseFields.shape.value.max(100, {
+    message: "Percentage value cannot exceed 100",
+  }),
+  maxDiscountAmount: z.preprocess(
+    // --- THIS IS THE FIX ---
+    // If value is "", convert to null BEFORE coercion
+    (val) => (val === "" ? null : val),
+    z.coerce
+      .number({ message: "Max discount must be a number" })
+      .positive({ message: "Max discount must be positive" })
+      .optional()
+      .nullable() // Allow null
+  ),
+});
+
+// --- Schema specific to 'fixed' coupons ---
+const fixedCouponSchema = couponBaseFields.extend({
+  type: z.literal(CouponType[1]), // 'fixed'
+  // maxDiscountAmount is correctly excluded
+});
+
+// --- Discriminated Union for CREATE ---
+const couponBodyUnionSchema = z.discriminatedUnion("type", [
+  percentageCouponSchema,
+  fixedCouponSchema,
+]);
+
+// --- Refinements for CREATE ---
+const createCouponBodyBaseSchema = couponBodyUnionSchema
   .refine((data) => data.validUntil > data.validFrom, {
     message: '"Valid until" date must be after "valid from" date',
     path: ["validUntil"],
   })
   .refine(
     (data) => {
-      if (data.type === "percentage") return data.value <= 100;
-      return true;
-    },
-    { message: "Percentage value cannot exceed 100", path: ["value"] }
-  )
-  .refine(
-    (data) => {
-      if (data.type === "fixed" && data.maxDiscountAmount) return false;
-      return true;
-    },
-    {
-      message: 'Fixed coupons cannot have a "max discount amount"',
-      path: ["maxDiscountAmount"],
-    }
-  )
-  // --- ADD NEW REFINEMENT RULES ---
-  .refine(
-    (data) => {
-      // If not all products, must specify categories OR products
       if (data.appliesToAllProducts === false) {
         const hasCategories =
           data.appliesToCategories && data.appliesToCategories.length > 0;
         const hasProducts =
           data.appliesToProducts && data.appliesToProducts.length > 0;
-        return hasCategories || hasProducts; // Must have one
+        return hasCategories || hasProducts;
       }
       return true;
     },
@@ -78,23 +81,27 @@ const couponBodyBaseSchema = z
   )
   .refine(
     (data) => {
-      // Cannot have both category and product restrictions (simplifies logic)
       const hasCategories =
         data.appliesToCategories && data.appliesToCategories.length > 0;
       const hasProducts =
         data.appliesToProducts && data.appliesToProducts.length > 0;
-      return !(hasCategories && hasProducts); // Cannot be both
+      return !(hasCategories && hasProducts);
     },
     {
       message: "Coupon can apply to categories OR products, but not both.",
-      path: ["appliesToCategories"], // Or appliesToProducts
+      path: ["appliesToCategories"],
     }
-  );
+  )
+  .transform((data) => ({
+    ...data,
+    appliesToCategories: data.appliesToCategories ?? [],
+    appliesToProducts: data.appliesToProducts ?? [],
+  }));
 
-// 2. Create the 'create' schema (unchanged)
+// --- Create Schema ---
 const createCouponZodSchema = z
   .object({
-    body: couponBodyBaseSchema,
+    body: createCouponBodyBaseSchema,
   })
   .transform((data) => ({
     body: {
@@ -103,13 +110,31 @@ const createCouponZodSchema = z
     },
   }));
 
-// 3. Create the 'update' schema (unchanged, .partial() handles it)
+// --- UPDATE SCHEMA (NEW LOGIC) ---
+
+// 1. Define a schema that includes ALL possible fields
+const updateCouponAllFields = couponBaseFields.extend({
+  type: z.enum([...CouponType] as [string, ...string[]]).optional(),
+  maxDiscountAmount: z.preprocess(
+    // --- APPLY THE SAME FIX HERE ---
+    (val) => (val === "" ? null : val),
+    z.coerce
+      .number({ message: "Max discount must be a number" })
+      .positive({ message: "Max discount must be positive" })
+      .optional()
+      .nullable()
+  ),
+});
+
+// 2. Create the update schema
 const updateCouponZodSchema = z
   .object({
-    body: couponBodyBaseSchema.partial(),
+    body: updateCouponAllFields.partial(), // Make all fields optional
   })
+  // 3. Add refinements
   .refine(
-    (data: { body: Partial<z.infer<typeof couponBodyBaseSchema>> }) => {
+    (data) => {
+      // Date check
       if (data.body?.validFrom && data.body?.validUntil) {
         return data.body.validUntil > data.body.validFrom;
       }
@@ -119,9 +144,42 @@ const updateCouponZodSchema = z
       message: '"Valid until" date must be after "valid from" date',
       path: ["body", "validUntil"],
     }
-  );
+  )
+  .refine(
+    (data) => {
+      // Logic: IF type is "fixed", maxDiscountAmount must NOT be a positive number.
+      if (data.body?.type === "fixed") {
+        return !data.body.maxDiscountAmount || data.body.maxDiscountAmount <= 0;
+      }
+      return true;
+    },
+    {
+      message: 'Fixed coupons cannot have a "max discount amount".',
+      path: ["body", "maxDiscountAmount"],
+    }
+  )
+  .refine(
+    (data) => {
+      // IF type is 'percentage' and value is provided, check it
+      if (data.body?.type === "percentage" && data.body.value) {
+        return data.body.value <= 100;
+      }
+      return true;
+    },
+    {
+      message: "Percentage value cannot exceed 100.",
+      path: ["body", "value"],
+    }
+  )
+  // 4. Add transform (the comparison error is now gone)
+  .transform((data) => {
+    if (data.body?.code) {
+      data.body.code = data.body.code.toUpperCase().trim();
+    }
+    return data;
+  });
 
-// Schema for a single item in the cart
+// --- Apply Coupon Schema --- (Remains the same)
 const couponCartItemZodSchema = z.object({
   productId: z.string().min(1, { message: "Product ID is required" }),
   productSizeId: z.string().min(1, { message: "Product Size ID is required" }),
@@ -131,7 +189,6 @@ const couponCartItemZodSchema = z.object({
     .positive({ message: "Quantity must be a positive integer" }),
 });
 
-// Update this schema to take 'items' instead of 'orderTotal'
 const applyCouponZodSchema = z.object({
   body: z.object({
     code: z.string().min(1, { message: "Coupon code is required" }),
@@ -144,5 +201,5 @@ const applyCouponZodSchema = z.object({
 export const CouponValidation = {
   createCouponZodSchema,
   updateCouponZodSchema,
-  applyCouponZodSchema, // This is now updated
+  applyCouponZodSchema,
 };

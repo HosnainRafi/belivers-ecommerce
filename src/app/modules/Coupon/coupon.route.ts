@@ -24,11 +24,7 @@ router.post(
   CouponController.createCoupon
 );
 
-router.get(
-  "/",
-  auth(ADMIN_ROLE.manager, ADMIN_ROLE.super_admin),
-  CouponController.getAllCoupons
-);
+router.get("/", CouponController.getAllCoupons);
 
 router.get(
   "/:id",

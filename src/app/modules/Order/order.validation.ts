@@ -7,6 +7,7 @@ const shippingAddressZodSchema = z.object({
   customerName: z.string().min(1, { message: "Customer name is required" }),
   mobile: z.string().min(1, { message: "Mobile number is required" }),
   district: z.string().min(1, { message: "District is required" }),
+  upazila: z.string().min(1, { message: "Upazila is required" }),
   addressLine: z.string().min(1, { message: "Address is required" }),
   postalCode: z.string().optional(),
 });
@@ -56,7 +57,20 @@ const updateOrderStatusZodSchema = z.object({
   }),
 });
 
+const trackOrderZodSchema = z.object({
+  body: z
+    .object({
+      trackingNumber: z.string().optional(),
+      mobile: z.string().optional(),
+    })
+    .refine((data) => data.trackingNumber || data.mobile, {
+      message: "Either tracking number or mobile number is required",
+      path: ["trackingNumber"], // Can point to either field
+    }),
+});
+
 export const OrderValidation = {
   createOrderZodSchema,
   updateOrderStatusZodSchema,
+  trackOrderZodSchema,
 };

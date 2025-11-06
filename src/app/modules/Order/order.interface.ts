@@ -9,6 +9,7 @@ export type TShippingAddress = {
   customerName: string;
   mobile: string;
   district: string;
+  upazila: string;
   addressLine: string;
   postalCode?: string;
 };
@@ -54,6 +55,20 @@ export type TOrderInputItem = {
   productId: string;
   productSizeId: string; // The _id of the size sub-document
   quantity: number;
+};
+
+export type TPublicOrderTracking = {
+  trackingNumber: string;
+  status: (typeof OrderStatus)[number];
+  paymentStatus: (typeof PaymentStatus)[number];
+  statusHistory: TOrderStatusHistory[];
+  createdAt: Date;
+  items: {
+    title: string;
+    size: string;
+    quantity: number;
+    image: string;
+  }[];
 };
 
 export type TCreateOrderPayload = {

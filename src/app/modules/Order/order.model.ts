@@ -14,6 +14,7 @@ const shippingAddressSchema = new Schema<TShippingAddress>(
     customerName: { type: String, required: true },
     mobile: { type: String, required: true },
     district: { type: String, required: true },
+    upazila: { type: String, required: true },
     addressLine: { type: String, required: true },
     postalCode: { type: String },
   },

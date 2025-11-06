@@ -23,5 +23,8 @@ export type TProduct = {
   sku?: string; // Main product SKU (optional)
   isActive: boolean;
   averageRating: number;
+  newArrival?: boolean;
+  productOrder?: number;
   reviewCount: number;
+  deleted?: boolean;
 };

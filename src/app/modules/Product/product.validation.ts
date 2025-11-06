@@ -45,6 +45,8 @@ const createProductZodSchema = z.object({
         .min(1, { message: "At least one size is required" }),
       sku: z.string().optional(),
       isActive: z.boolean().default(true),
+      newArrival: z.boolean().optional().default(false),
+      productOrder: z.coerce.number().int().optional().default(0),
     })
     .refine(
       (data) => {
@@ -82,6 +84,8 @@ const updateProductZodSchema = z.object({
       sizes: z.array(productSizeZodSchema).min(1).optional(),
       sku: z.string().optional(),
       isActive: z.boolean().optional(),
+      newArrival: z.boolean().optional(),
+      productOrder: z.coerce.number().int().optional(),
     })
     .transform((data) => {
       // If the title is being updated, update the slug as well

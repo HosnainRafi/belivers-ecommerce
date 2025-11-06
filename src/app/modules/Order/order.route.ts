@@ -15,6 +15,12 @@ router.post(
   OrderController.createOrder
 );
 
+router.post(
+  "/track",
+  validateRequest(OrderValidation.trackOrderZodSchema),
+  OrderController.trackOrder
+);
+
 // --- Admin-Only Routes ---
 
 router.get(

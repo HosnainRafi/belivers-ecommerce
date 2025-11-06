@@ -48,6 +48,31 @@ const updateCategory = catchAsync(async (req: Request, res: Response) => {
   });
 });
 
+const getSubcategoriesByParent = catchAsync(
+  async (req: Request, res: Response) => {
+    const { parentId } = req.params;
+    const result = await CategoryService.getSubcategoriesByParentId(parentId);
+    sendResponse<TCategory[]>(res, {
+      // Use TCategory[] as it returns a flat list
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Subcategories retrieved successfully!",
+      data: result,
+    });
+  }
+);
+
+const getAllSubcategories = catchAsync(async (req: Request, res: Response) => {
+  const result = await CategoryService.getAllSubcategoriesFromDB();
+  sendResponse<TCategory[]>(res, {
+    // Returns a flat list
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "All subcategories retrieved successfully!",
+    data: result,
+  });
+});
+
 const deleteCategory = catchAsync(async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await CategoryService.deleteCategoryFromDB(id);
@@ -64,5 +89,7 @@ export const CategoryController = {
   getAllCategories,
   getSingleCategory,
   updateCategory,
+  getSubcategoriesByParent,
   deleteCategory,
+  getAllSubcategories,
 };

@@ -10,7 +10,12 @@ import {
   TCouponValidationResponse,
 } from "../Coupon/coupon.service";
 import { Product } from "../Product/product.model";
-import { TCreateOrderPayload, TOrder, TOrderItem } from "./order.interface";
+import {
+  TCreateOrderPayload,
+  TOrder,
+  TOrderItem,
+  TPublicOrderTracking,
+} from "./order.interface";
 import { Order } from "./order.model";
 import { generateTrackingNumber } from "./order.utils";
 import { PaymentStatus, OrderStatus } from "./order.constants";
@@ -33,13 +38,12 @@ const createOrderIntoDB = async (
 
   let subtotal = 0;
   const processedItems: TOrderItem[] = [];
-  // Prepare stock updates
   const stockUpdates: {
     productId: string;
     sizeId: string;
     quantity: number;
-    title: string; // For potential error messages
-    size: string; // For potential error messages
+    title: string;
+    size: string;
   }[] = [];
 
   // 2. Validate items, calculate subtotal, prepare stock updates
@@ -72,7 +76,6 @@ const createOrderIntoDB = async (
       );
     }
 
-    // *** STOCK CHECK REMAINS CRUCIAL ***
     if (size.stock < item.quantity) {
       throw new ApiError(
         httpStatus.BAD_REQUEST,
@@ -95,7 +98,6 @@ const createOrderIntoDB = async (
       totalPrice: totalPrice,
     });
 
-    // Add to stock update list
     stockUpdates.push({
       productId: product._id.toString(),
       sizeId: size._id!.toString(),
@@ -105,56 +107,67 @@ const createOrderIntoDB = async (
     });
   }
 
-  // 3. Validate and apply coupon (ensure coupon service uses items if needed)
+  // 3. Validate and apply coupon
   let couponValidation: TCouponValidationResponse = {
     isValid: false,
     discountAmount: 0,
     message: "",
   };
   if (couponCode) {
-    // Assuming coupon service needs items for category/product checks
     couponValidation = await CouponService.validateAndApplyCoupon(
       couponCode,
-      items // Pass cart items
+      items
     );
     if (!couponValidation.isValid) {
       throw new ApiError(httpStatus.BAD_REQUEST, couponValidation.message);
     }
   }
 
-  // 4. Calculate final totals (unchanged)
+  // 4. Calculate final totals
   const discountAmount = couponValidation.discountAmount;
   const totalAmount = subtotal + shipping - discountAmount;
 
-  // 5. Create the order AND DECREMENT STOCK within a transaction
+  // 5. Create the order AND DECREMENT STOCK (Reservation)
   const session = await mongoose.startSession();
   let newOrder: TOrder | null = null;
   try {
     session.startTransaction();
 
-    // 5a. Decrement product stock (Reserve stock)
+    // 5a. Decrement product stock
     for (const update of stockUpdates) {
+      // --- THIS IS THE FIX ---
+      // We use $elemMatch to check stock atomically
+      // and arrayFilters to update the specific size
       const updateResult = await Product.updateOne(
-        // Atomically check stock >= quantity during update to prevent race conditions
         {
           _id: update.productId,
-          "sizes._id": update.sizeId,
-          "sizes.stock": { $gte: update.quantity },
+          sizes: {
+            $elemMatch: {
+              _id: new mongoose.Types.ObjectId(update.sizeId),
+              stock: { $gte: update.quantity },
+            },
+          },
         },
-        { $inc: { "sizes.$.stock": -update.quantity } },
-        { session }
+        { $inc: { "sizes.$[elem].stock": -update.quantity } }, // Use $[elem]
+        {
+          session,
+          // Explicitly define 'elem' to match the sizeId
+          arrayFilters: [
+            { "elem._id": new mongoose.Types.ObjectId(update.sizeId) },
+          ],
+        }
       );
+      // --- END OF FIX ---
 
-      // If updateResult.modifiedCount is 0, stock was insufficient (race condition)
       if (updateResult.modifiedCount === 0) {
         throw new ApiError(
-          httpStatus.CONFLICT, // 409 Conflict is appropriate
+          httpStatus.CONFLICT,
           `Stock changed for ${update.title} (Size: ${update.size}) just before order completion. Please try again.`
         );
       }
     }
 
-    // 5b. Increment coupon usage (unchanged)
+    // 5b. Increment coupon usage
     if (couponValidation.isValid && couponValidation.coupon) {
       await Coupon.updateOne(
         { _id: couponValidation.coupon._id },
@@ -177,8 +190,8 @@ const createOrderIntoDB = async (
           discountAmount: discountAmount,
           totalAmount: totalAmount,
           paymentStatus: "pending",
-          status: "pending", // Order starts as pending
-          statusHistory: [], // Pre-save hook adds initial history
+          status: "pending",
+          statusHistory: [],
         },
       ],
       { session }
@@ -188,7 +201,6 @@ const createOrderIntoDB = async (
     await session.commitTransaction();
   } catch (error) {
     await session.abortTransaction();
-    // Pass specific error messages through
     const message =
       error instanceof ApiError
         ? error.message
@@ -204,7 +216,6 @@ const createOrderIntoDB = async (
   }
 
   if (!newOrder) {
-    // Should not happen if transaction logic is correct
     throw new ApiError(
       httpStatus.INTERNAL_SERVER_ERROR,
       "Failed to create order after transaction."
@@ -214,7 +225,7 @@ const createOrderIntoDB = async (
   return newOrder;
 };
 
-// --- Get All Orders (Admin) --- (Unchanged)
+// --- Get All Orders (Admin) ---
 const getAllOrdersFromDB = async (options: {
   page?: number;
   limit?: number;
@@ -222,25 +233,15 @@ const getAllOrdersFromDB = async (options: {
   sortOrder?: SortOrder;
 }): Promise<IGenericResponse<TOrder[]>> => {
   const { page, limit, skip, sortBy, sortOrder } = calculatePagination(options);
-
   const result = await Order.find()
     .sort({ [sortBy]: sortOrder })
     .skip(skip)
     .limit(limit);
-
   const total = await Order.countDocuments();
-
-  return {
-    meta: {
-      page,
-      limit,
-      total,
-    },
-    data: result,
-  };
+  return { meta: { page, limit, total }, data: result };
 };
 
-// --- Get Single Order (Admin or authenticated user) --- (Unchanged)
+// --- Get Single Order (Admin) ---
 const getSingleOrderFromDB = async (
   orderId: string
 ): Promise<TOrder | null> => {
@@ -264,13 +265,11 @@ const updateOrderStatusInDB = async (
     note?: string;
   }
 ): Promise<TOrder | null> => {
-  // Use a session for atomicity
   const session = await mongoose.startSession();
   let updatedOrder: TOrder | null = null;
 
   try {
     session.startTransaction();
-
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       throw new ApiError(httpStatus.NOT_FOUND, "Order not found.");
@@ -279,53 +278,55 @@ const updateOrderStatusInDB = async (
     const { status, paymentStatus, note } = payload;
     const previousStatus = order.status;
 
-    // If status isn't changing, just update payment/note and save
     if (status === previousStatus) {
       let changed = false;
       if (paymentStatus && order.paymentStatus !== paymentStatus) {
         order.paymentStatus = paymentStatus;
         changed = true;
       }
-      // Add a note even if status doesn't change
       if (note) {
         order.statusHistory.push({
-          status: previousStatus, // Keep current status
+          status: previousStatus,
           note: `Note added: ${note}`,
           changedBy: new mongoose.Types.ObjectId(adminId),
           changedAt: new Date(),
         });
         changed = true;
       }
-      // Only save if something actually changed
       if (changed) {
         updatedOrder = await order.save({ session });
       } else {
-        updatedOrder = order; // Return the unchanged order
+        updatedOrder = order;
       }
       await session.commitTransaction();
       session.endSession();
       return updatedOrder;
     }
 
-    // --- MANAGE STOCK REVERSAL ON CANCELLATION ---
-    // INCREMENT Stock ONLY when cancelling an order where stock was previously reserved/decremented.
+    // --- REVERT STOCK ON CANCELLATION (using arrayFilters) ---
     if (
       status === "cancelled" &&
-      (previousStatus === "pending" || // Stock was decremented on creation
+      (previousStatus === "pending" ||
         previousStatus === "confirmed" ||
-        previousStatus === "shipped") // Check all states where stock was held
+        previousStatus === "shipped")
     ) {
       for (const item of order.items) {
+        // --- THIS IS THE FIX ---
         await Product.updateOne(
-          { _id: item.productId, "sizes._id": item.productSizeId },
-          { $inc: { "sizes.$.stock": item.quantity } }, // Add back the quantity
-          { session }
+          { _id: item.productId },
+          { $inc: { "sizes.$[elem].stock": item.quantity } }, // Add back
+          {
+            session,
+            arrayFilters: [
+              { "elem._id": new mongoose.Types.ObjectId(item.productSizeId) },
+            ],
+          }
         );
+        // --- END OF FIX ---
       }
     }
-    // --- NO Stock decrement needed on confirmation/shipping anymore ---
 
-    // Update the order document status and history
+    // Update the order document status
     order.statusHistory.push({
       status: status,
       note: note || `Status changed from ${previousStatus} to ${status}`,
@@ -360,9 +361,55 @@ const updateOrderStatusInDB = async (
   return updatedOrder;
 };
 
+const trackOrderPublicly = async (
+  trackingNumber?: string,
+  mobile?: string
+): Promise<TPublicOrderTracking[]> => {
+  // <-- Returns an array
+
+  const orConditions = [];
+  if (trackingNumber) {
+    orConditions.push({ trackingNumber: trackingNumber });
+  }
+  if (mobile) {
+    orConditions.push({ "shippingAddress.mobile": mobile });
+  }
+
+  // Zod ensures at least one condition is present
+  const query = { $or: orConditions };
+
+  // Find all matching orders, sort by newest first
+  const orders = await Order.find(query).sort({ createdAt: -1 });
+
+  if (orders.length === 0) {
+    throw new ApiError(
+      httpStatus.NOT_FOUND,
+      "No orders found matching your details."
+    );
+  }
+
+  // Map to the safe public-facing type
+  const publicOrdersData: TPublicOrderTracking[] = orders.map((order) => ({
+    trackingNumber: order.trackingNumber,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    statusHistory: order.statusHistory,
+    createdAt: (order as any).createdAt, // Mongoose doc has this
+    items: order.items.map((item) => ({
+      title: item.title,
+      size: item.size,
+      quantity: item.quantity,
+      image: item.image,
+    })),
+  }));
+
+  return publicOrdersData;
+};
+
 export const OrderService = {
   createOrderIntoDB,
   getAllOrdersFromDB,
   getSingleOrderFromDB,
   updateOrderStatusInDB,
+  trackOrderPublicly,
 };

@@ -1,5 +1,6 @@
 // src/app/modules/Category/category.validation.ts
 import { z } from "zod";
+import { CategoryGender } from "./category.model";
 
 // Helper to generate a URL-friendly slug
 const createSlug = (name: string): string => {
@@ -10,46 +11,51 @@ const createSlug = (name: string): string => {
     .replace(/-+/g, "-"); // Remove consecutive hyphens
 };
 
+// const sizeChartZodSchema = z
+//   .object({
+//     headers: z
+//       .array(z.string().min(1))
+//       .min(1, { message: "Size chart must have at least one header." }),
+//     rows: z
+//       .array(z.array(z.string()))
+//       .min(1, { message: "Size chart must have at least one row." }),
+//   })
+//   .refine(
+//     (data) => {
+//       // Ensure all rows have the same number of columns as the headers
+//       return data.rows.every((row) => row.length === data.headers.length);
+//     },
+//     {
+//       message:
+//         "All size chart rows must have the same number of entries as the headers.",
+//       path: ["rows"],
+//     }
+//   )
+//   .optional();
+
 const sizeChartZodSchema = z
-  .object({
-    headers: z
-      .array(z.string().min(1))
-      .min(1, { message: "Size chart must have at least one header." }),
-    rows: z
-      .array(z.array(z.string()))
-      .min(1, { message: "Size chart must have at least one row." }),
-  })
-  .refine(
-    (data) => {
-      // Ensure all rows have the same number of columns as the headers
-      return data.rows.every((row) => row.length === data.headers.length);
-    },
-    {
-      message:
-        "All size chart rows must have the same number of entries as the headers.",
-      path: ["rows"],
-    }
-  )
-  .optional();
+  .string()
+  .url({ message: "Size chart must be a valid URL" })
+  .optional()
+  .nullable();
 
 const createCategoryZodSchema = z.object({
   body: z
     .object({
-      //
-      // --- THIS IS THE FIX ---
-      //
       name: z.string().min(1, { message: "Category name is required" }),
       description: z.string().optional(),
       image: z.string().url({ message: "Invalid image URL" }).optional(),
       sizeChart: sizeChartZodSchema,
+      parentCategory: z.string().optional().nullable(),
+      order: z.coerce.number().int().optional().default(0),
+      gender: z.enum([...CategoryGender] as [string, ...string[]]).optional(),
     })
-    .transform((data) => {
-      // Automatically create the slug from the name
-      return {
-        ...data,
-        slug: createSlug(data.name),
-      };
-    }),
+    .transform((data) => ({
+      ...data,
+      slug: createSlug(data.name),
+      // Ensure empty string becomes null for the DB default
+      parentCategory: data.parentCategory === "" ? null : data.parentCategory,
+    })),
 });
 
 const updateCategoryZodSchema = z.object({
@@ -58,17 +64,31 @@ const updateCategoryZodSchema = z.object({
       name: z.string().optional(),
       description: z.string().optional(),
       image: z.string().url({ message: "Invalid image URL" }).optional(),
-      sizeChart: sizeChartZodSchema.nullable(),
+      sizeChart: sizeChartZodSchema,
+      parentCategory: z.string().optional().nullable(),
+      order: z.coerce.number().int().optional(),
+      gender: z
+        .enum([...CategoryGender] as [string, ...string[]])
+        .optional()
+        .nullable(),
     })
     .transform((data) => {
-      // If the name is being updated, update the slug as well
+      const transformedData: any = { ...data };
       if (data.name) {
-        return {
-          ...data,
-          slug: createSlug(data.name),
-        };
+        transformedData.slug = createSlug(data.name);
       }
-      return data;
+      // Handle parentCategory update explicitly
+      if (data.parentCategory !== undefined) {
+        transformedData.parentCategory =
+          data.parentCategory === "" || data.parentCategory === null
+            ? null
+            : data.parentCategory;
+      }
+      if (data.gender !== undefined) {
+        transformedData.gender = data.gender === "" ? null : data.gender;
+      }
+
+      return transformedData;
     }),
 });
 
